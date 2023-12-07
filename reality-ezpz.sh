@@ -1073,7 +1073,8 @@ function generate_engine_config {
       elif [[ ${config[transport]} == 'shadowtls' ]]; then
         users_object=${users_object}'{"password": "'"${users[${user}]}"'", "name": "'"${user}"'"}'
       else
-        users_object=${users_object}'{"uuid": "'"${users[${user}]}"'", "flow": "'"$([[ ${config[transport]} == 'tcp' ]] && echo 'xtls-rprx-vision' || true)"'", "name": "'"${user}"'"}'
+        #users_object=${users_object}'{"uuid": "'"${users[${user}]}"'", "flow": "'"$([[ ${config[transport]} == 'tcp' ]] && echo 'xtls-rprx-vision' || true)"'", "name": "'"${user}"'"}'
+        users_object=${users_object}'{"uuid": "'"${users[${user}]}"'", "flow": "", "name": "'"${user}"'"}'
       fi
     done
     cat >"${path[engine]}" <<EOF
@@ -1102,7 +1103,12 @@ function generate_engine_config {
       "tag": "in",	
       "listen": "::",
       "listen_port": 8443,
+      "sniff": true,
+      "sniff_override_destination": true,
+      "tcp_multi_path": true,   
+      "domain_strategy": "prefer_ipv4",
       "users": [${users_object}],
+      "multiplex": { "enabled": true, "padding": true, "brutal": {"enabled": false, "up_mbps": 1000, "down_mbps": 100} },
       $(if [[ ${config[security]} == 'reality' && ${config[transport]} != 'shadowtls' ]]; then
         echo "${reality_object}"
       elif [[ ${config[transport]} == 'http' || ${config[transport]} == 'tcp' || ${config[transport]} == 'tuic' || ${config[transport]} == 'hysteria2' ]]; then
