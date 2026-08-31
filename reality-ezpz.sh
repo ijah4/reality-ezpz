@@ -38,13 +38,13 @@ HEIGHT=30
 WIDTH=60
 CHOICE_HEIGHT=20
 
-image[xray]="teddysun/xray:25.12.8"
-image[sing-box]="gzxhwq/sing-box:1.12.14"
-image[nginx]="nginx:1.24.0"
-image[certbot]="certbot/certbot:v2.6.0"
-image[haproxy]="haproxy:2.8.0"
-image[python]="python:3.11-alpine"
-image[wgcf]="virb3/wgcf:2.2.29"
+image[xray]="teddysun/xray:26.7.28"
+image[sing-box]="gzxhwq/sing-box:1.14.0"
+image[nginx]="nginx:1.30.4"
+image[certbot]="certbot/certbot:v5.7.0"
+image[haproxy]="haproxy:3.4.4"
+image[python]="python:3.12.14-alpine"
+image[wgcf]="virb3/wgcf:2.2.32"
 
 defaults[transport]=tcp
 defaults[domain]=www.google.com
@@ -727,7 +727,7 @@ function install_docker {
     docker_cmd="docker-compose"
     return 0
   fi
-  curl -fsSL -m 30 https://github.com/docker/compose/releases/download/v2.28.0/docker-compose-linux-$(uname -m) -o /usr/local/bin/docker-compose
+  curl -fsSL -m 30 https://github.com/docker/compose/releases/download/v5.5.0/docker-compose-linux-$(uname -m) -o /usr/local/bin/docker-compose
   chmod +x /usr/local/bin/docker-compose
   docker_cmd="docker-compose"
   return 0
@@ -735,7 +735,6 @@ function install_docker {
 
 function generate_docker_compose {
   cat >"${path[compose]}" <<EOF
-version: "3"
 networks:
   reality:
     driver: bridge
@@ -754,12 +753,20 @@ services:
     $([[ ${config[security]} != 'reality' && ${config[transport]} != 'shadowtls' ]] && echo "expose:" || true)
     $([[ ${config[security]} != 'reality' && ${config[transport]} != 'shadowtls' ]] && echo "- 8443" || true)
     restart: always
+    user: "65532:65532"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt:
+    - no-new-privileges:true
+    tmpfs:
+    - /tmp
+    - /var/cache/sing-box
     environment:
       TZ: Etc/UTC
     volumes:
-    - ./${path[engine]#${config_path}/}:/etc/${config[core]}/config.json
-    $([[ ${config[security]} != 'reality' ]] && { [[ ${config[transport]} == 'http' ]] || [[ ${config[transport]} == 'tcp' ]] || [[ ${config[transport]} == 'tuic' ]] || [[ ${config[transport]} == 'hysteria2' ]]; } && echo "- ./${path[server_crt]#${config_path}/}:/etc/${config[core]}/server.crt" || true)
-    $([[ ${config[security]} != 'reality' ]] && { [[ ${config[transport]} == 'http' ]] || [[ ${config[transport]} == 'tcp' ]] || [[ ${config[transport]} == 'tuic' ]] || [[ ${config[transport]} == 'hysteria2' ]]; } && echo "- ./${path[server_key]#${config_path}/}:/etc/${config[core]}/server.key" || true)
+    - ./${path[engine]#${config_path}/}:/etc/${config[core]}/config.json:ro
+    $([[ ${config[security]} != 'reality' ]] && { [[ ${config[transport]} == 'http' ]] || [[ ${config[transport]} == 'tcp' ]] || [[ ${config[transport]} == 'tuic' ]] || [[ ${config[transport]} == 'hysteria2' ]]; } && echo "- ./${path[server_crt]#${config_path}/}:/etc/${config[core]}/server.crt:ro" || true)
+    $([[ ${config[security]} != 'reality' ]] && { [[ ${config[transport]} == 'http' ]] || [[ ${config[transport]} == 'tcp' ]] || [[ ${config[transport]} == 'tuic' ]] || [[ ${config[transport]} == 'hysteria2' ]]; } && echo "- ./${path[server_key]#${config_path}/}:/etc/${config[core]}/server.key:ro" || true)
     networks:
     - reality
 $(if [[ ${config[security]} != 'reality' && ${config[transport]} != 'shadowtls' ]]; then
@@ -810,7 +817,6 @@ EOF
 
 function generate_tgbot_compose {
   cat >"${path[tgbot_compose]}" <<EOF
-version: "3"
 networks:
   tgbot:
     driver: bridge
@@ -822,13 +828,15 @@ services:
   tgbot:
     build: ./
     restart: always
+    security_opt:
+    - no-new-privileges:true
+    cap_drop: [ALL]
     environment:
       BOT_TOKEN: ${config[tgbot_token]}
       BOT_ADMIN: ${config[tgbot_admins]}
     volumes:
     - /var/run/docker.sock:/var/run/docker.sock
     - ../:${config_path}
-    - /etc/docker/:/etc/docker/
     networks:
     - tgbot
 EOF
@@ -976,7 +984,7 @@ function generate_tgbot_dockerfile {
 FROM ${image[python]}
 WORKDIR ${config_path}/tgbot
 RUN apk add --no-cache docker-cli-compose curl bash newt libqrencode-tools sudo openssl jq zip unzip
-RUN pip install --no-cache-dir python-telegram-bot==13.5 qrcode[pil]==7.4.2
+RUN pip install --no-cache-dir python-telegram-bot==22.8 qrcode[pil]==8.2
 CMD [ "python", "./tgbot.py" ]
 EOF
 }
@@ -1085,7 +1093,7 @@ function generate_engine_config {
   },
   "dns": {
     "servers": [
-    $([[ ${config[safenet]} == ON ]] && echo '{"type": "tcp", "server": "1.1.1.3"}' || echo '{"type": "tcp", "server": "1.1.1.1"}')
+    $([[ ${config[safenet]} == ON ]] && echo '{"type": "https", "server": "1.1.1.3", "server_port": 443}' || echo '{"type": "https", "server": "1.1.1.1", "server_port": 443}')
     ],
     "strategy": "prefer_ipv4"
   },
@@ -1103,10 +1111,7 @@ function generate_engine_config {
       "tag": "in",	
       "listen": "::",
       "listen_port": 8443,
-      "sniff": true,
-      "sniff_override_destination": true,
-      "tcp_multi_path": true,   
-      "domain_strategy": "prefer_ipv4",
+      "tcp_multi_path": true,
       "users": [${users_object}],
       "multiplex": { "enabled": true, "padding": true, "brutal": {"enabled": false, "up_mbps": 1000, "down_mbps": 100} },
       $(if [[ ${config[security]} == 'reality' && ${config[transport]} != 'shadowtls' ]]; then
@@ -1161,6 +1166,12 @@ function generate_engine_config {
       "tag": "block"
     }
   ],
+  "http_clients": [
+    {
+      "tag": "internet",
+      "detour": "internet"
+    }
+  ],
   "route": {
     "final": "$([[ ${config[warp]} == ON ]] && echo "warp" || echo "internet")",
     "rule_set": [
@@ -1169,35 +1180,35 @@ function generate_engine_config {
         "type": "remote",
         "format": "binary",
         "url": "https://raw.githubusercontent.com/aleskxyz/sing-box-rules/refs/heads/rule-set/block.srs",
-        "download_detour": "internet"
+        "http_client": "internet"
       },
       {
         "tag": "nsfw",
         "type": "remote",
         "format": "binary",
         "url": "https://raw.githubusercontent.com/aleskxyz/sing-box-rules/refs/heads/rule-set/geosite-nsfw.srs",
-        "download_detour": "internet"
+        "http_client": "internet"
       },
       {
         "tag": "geoip-private",
         "type": "remote",
         "format": "binary",
         "url": "https://raw.githubusercontent.com/aleskxyz/sing-box-rules/refs/heads/rule-set/geoip-private.srs",
-        "download_detour": "internet"
+        "http_client": "internet"
       },
       {
         "tag": "geosite-private",
         "type": "remote",
         "format": "binary",
         "url": "https://raw.githubusercontent.com/aleskxyz/sing-box-rules/refs/heads/rule-set/geosite-private.srs",
-        "download_detour": "internet"
+        "http_client": "internet"
       },
       {
         "tag": "bypass",
         "type": "remote",
         "format": "binary",
         "url": "https://raw.githubusercontent.com/aleskxyz/sing-box-rules/refs/heads/rule-set/bypass.srs",
-        "download_detour": "internet"
+        "http_client": "internet"
       }
     ],
     "rules": [
@@ -1247,7 +1258,8 @@ function generate_engine_config {
   },
   "experimental": {
     "cache_file": {
-      "enabled": true
+      "enabled": true,
+      "path": "/var/cache/sing-box/cache.db"
     }
   }
 }
@@ -1488,7 +1500,7 @@ function print_client_configuration {
     client_config="${client_config}$([[ ${config[security]} == 'selfsigned' ]] && echo "&insecure=1" || true)"
     client_config="${client_config}#${username}"
   elif [[ ${config[transport]} == 'shadowtls' ]]; then
-    client_config='{"dns":{"independent_cache":true,"rules":[{"domain":["dns.google"],"server":"dns-direct"}],"servers":[{"address":"https://dns.google/dns-query","address_resolver":"dns-direct","strategy":"ipv4_only","tag":"dns-remote"},{"address":"local","address_resolver":"dns-local","detour":"direct","strategy":"ipv4_only","tag":"dns-direct"},{"address":"local","detour":"direct","tag":"dns-local"},{"address":"rcode://success","tag":"dns-block"}]},"inbounds":[{"listen":"127.0.0.1","listen_port":6450,"override_address":"8.8.8.8","override_port":53,"tag":"dns-in","type":"direct"},{"domain_strategy":"","endpoint_independent_nat":true,"inet4_address":["172.19.0.1/28"],"mtu":9000,"sniff":true,"sniff_override_destination":false,"stack":"mixed","tag":"tun-in","auto_route":true,"type":"tun"},{"domain_strategy":"","listen":"127.0.0.1","listen_port":2080,"sniff":true,"sniff_override_destination":false,"tag":"mixed-in","type":"mixed"}],"log":{"level":"warning"},"outbounds":[{"method":"chacha20-ietf-poly1305","password":"'"${users[${username}]}"'","server":"127.0.0.1","server_port":1080,"type":"shadowsocks","udp_over_tcp":true,"domain_strategy":"","tag":"proxy","detour":"shadowtls"},{"password":"'"${users[${username}]}"'","server":"'"${config[server]}"'","server_port":'"${config[port]}"',"tls":{"enabled":true,"insecure":false,"server_name":"'"${config[domain]%%:*}"'","utls":{"enabled":true,"fingerprint":"chrome"}},"version":3,"type":"shadowtls","domain_strategy":"","tag":"shadowtls"},{"tag":"direct","type":"direct"},{"tag":"bypass","type":"direct"},{"tag":"block","type":"block"},{"tag":"dns-out","type":"dns"}],"route":{"auto_detect_interface":true,"rule_set":[],"rules":[{"outbound":"dns-out","port":[53]},{"inbound":["dns-in"],"outbound":"dns-out"},{"ip_cidr":["224.0.0.0/3","ff00::/8"],"outbound":"block","source_ip_cidr":["224.0.0.0/3","ff00::/8"]}]}}'
+    client_config='{"dns":{"rules":[{"domain":["dns.google"],"server":"dns-direct"}],"servers":[{"address":"https://dns.google/dns-query","address_resolver":"dns-direct","strategy":"ipv4_only","tag":"dns-remote"},{"address":"local","address_resolver":"dns-local","detour":"direct","strategy":"ipv4_only","tag":"dns-direct"},{"address":"local","detour":"direct","tag":"dns-local"},{"address":"rcode://success","tag":"dns-block"}]},"inbounds":[{"listen":"127.0.0.1","listen_port":6450,"override_address":"8.8.8.8","override_port":53,"tag":"dns-in","type":"direct"},{"endpoint_independent_nat":true,"inet4_address":["172.19.0.1/28"],"mtu":9000,"stack":"mixed","tag":"tun-in","auto_route":true,"type":"tun"},{"listen":"127.0.0.1","listen_port":2080,"tag":"mixed-in","type":"mixed"}],"log":{"level":"warning"},"outbounds":[{"method":"chacha20-ietf-poly1305","password":"'"${users[${username}]}"'","server":"127.0.0.1","server_port":1080,"type":"shadowsocks","udp_over_tcp":true,"tag":"proxy","detour":"shadowtls"},{"password":"'"${users[${username}]}"'","server":"'"${config[server]}"'","server_port":'"${config[port]}"',"tls":{"enabled":true,"insecure":false,"server_name":"'"${config[domain]%%:*}"'","utls":{"enabled":true,"fingerprint":"chrome"}},"version":3,"type":"shadowtls","tag":"shadowtls"},{"tag":"direct","type":"direct"},{"tag":"bypass","type":"direct"},{"tag":"block","type":"block"},{"tag":"dns-out","type":"dns"}],"route":{"auto_detect_interface":true,"rule_set":[],"rules":[{"outbound":"dns-out","port":[53]},{"inbound":["dns-in"],"outbound":"dns-out"},{"ip_cidr":["224.0.0.0/3","ff00::/8"],"outbound":"block","source_ip_cidr":["224.0.0.0/3","ff00::/8"]}]}}'
   else
     client_config="vless://"
     client_config="${client_config}${users[${username}]}"
@@ -2585,6 +2597,18 @@ net.ipv4.tcp_mtu_probing = 1
 net.core.default_qdisc=fq
 net.ipv4.tcp_congestion_control=bbr
 net.netfilter.nf_conntrack_max=1000000
+net.ipv4.conf.all.rp_filter = 2
+net.ipv4.conf.default.rp_filter = 2
+net.ipv4.conf.all.accept_redirects = 0
+net.ipv4.conf.default.accept_redirects = 0
+net.ipv4.conf.all.send_redirects = 0
+net.ipv4.conf.default.send_redirects = 0
+net.ipv4.conf.all.accept_source_route = 0
+net.ipv4.conf.default.accept_source_route = 0
+net.ipv6.conf.all.accept_redirects = 0
+net.ipv6.conf.default.accept_redirects = 0
+net.ipv6.conf.all.accept_source_route = 0
+net.ipv6.conf.default.accept_source_route = 0
 EOF
   sysctl -qp /etc/sysctl.d/99-reality-ezpz.conf >/dev/null 2>&1 || true
 }
