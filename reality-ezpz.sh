@@ -32,8 +32,6 @@ declare -A image
 config_path="/opt/reality-ezpz"
 compose_project='reality-ezpz'
 tgbot_project='tgbot'
-script_url='https://raw.githubusercontent.com/aleskxyz/reality-ezpz/master/reality-ezpz.sh'
-tgbot_script_url='https://raw.githubusercontent.com/aleskxyz/reality-ezpz/master/tgbot.py'
 # The engine container runs as this uid/gid. The TLS key is bind-mounted read-only
 # from the host, so its ownership has to match or the engine exits at startup.
 engine_uid='65532'
@@ -994,43 +992,68 @@ CMD [ "python", "./tgbot.py" ]
 EOF
 }
 
+# The script that is actually executing, as an absolute path. Only a real file on
+# disk qualifies: the /dev/fd/N form used by `bash <(curl ...)` is not one, and
+# nothing that cannot be read back can be pinned.
+function running_script_path {
+  local source="${BASH_SOURCE[0]}"
+  local dir
+  [[ -z "${source}" ]] && source="$0"
+  if [[ -f "${source}" && -r "${source}" ]]; then
+    dir="$(cd "$(dirname "${source}")" && pwd)" || return 1
+    echo "${dir}/$(basename "${source}")"
+    return 0
+  fi
+  return 1
+}
+
 function local_repo_file {
   local name="$1"
-  local source="${BASH_SOURCE[0]}"
-  [[ -z "${source}" ]] && source="$0"
-  # Only a real file next to the script counts; /dev/fd/N from `bash <(curl ...)` does not.
-  if [[ -f "${source}" && -r "${source}" ]]; then
-    if [[ -f "$(dirname "${source}")/${name}" ]]; then
-      echo "$(dirname "${source}")/${name}"
-      return 0
-    fi
+  local source
+  if ! source=$(running_script_path); then
+    return 1
+  fi
+  if [[ -f "$(dirname "${source}")/${name}" ]]; then
+    echo "$(dirname "${source}")/${name}"
+    return 0
   fi
   return 1
 }
 
 # Pins the installer inside the config directory so the Telegram bot runs a fixed,
-# already-reviewed copy instead of executing whatever the upstream branch serves at
-# that moment. Deploy-time fetch is the only remaining trust event, once.
+# already-reviewed copy. Nothing is ever fetched: the pinned copy is this script, the
+# one that is running. When the bot later invokes that copy it is pinning itself, so
+# the copy is skipped -- `cp` would fail on a file being its own source, and under
+# `set -e` that would abort every bot command.
 function pin_installer_script {
   local target="${config_path}/reality-ezpz.sh"
   local source
-  if source=$(local_repo_file 'reality-ezpz.sh'); then
+  if ! source=$(running_script_path); then
+    echo 'The Telegram bot needs a pinned copy of this script, but it was not started from a file.' >&2
+    echo 'Save it to disk and run it from there; a `bash <(curl ...)` invocation cannot be pinned.' >&2
+    exit 1
+  fi
+  if [[ ! "${source}" -ef "${target}" ]]; then
     cp -f "${source}" "${target}"
-  elif ! curl -fsSL -m 30 "${script_url}" -o "${target}"; then
-    echo 'Failed to pin reality-ezpz.sh for the Telegram bot' >&2
-    return 1
   fi
   chmod 700 "${target}"
 }
 
+# Same rule: taken from what the operator already has, never fetched. An existing
+# pinned copy is kept as it is, so a bot command that re-runs this script does not
+# need a tgbot.py source to be present at all.
 function download_tgbot_script {
   local source
+  if [[ -e "${path[tgbot_script]}" ]]; then
+    return 0
+  fi
   if source=$(local_repo_file 'tgbot.py'); then
     cp -f "${source}" "${path[tgbot_script]}"
-  else
-    curl -fsSL -m 30 "${tgbot_script_url}" -o "${path[tgbot_script]}"
+    chmod 600 "${path[tgbot_script]}"
+    return 0
   fi
-  chmod 600 "${path[tgbot_script]}"
+  echo 'tgbot.py was not found next to this script, and it is not fetched from the network.' >&2
+  exit 1
 }
 
 function generate_selfsigned_certificate {
