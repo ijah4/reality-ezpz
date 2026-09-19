@@ -587,6 +587,10 @@ function build_config {
     echo 'You cannot use "shadowtls" transport with "xray" core. Use other transports or change core to sing-box'
     exit 1
   fi
+  if [[ ${config[security]} == 'reality' && (${config[transport]} == 'tuic' || ${config[transport]} == 'hysteria2') ]]; then
+    echo 'You cannot use "reality" security with "tuic" or "hysteria2" transport. QUIC transports need real certificates or selfsigned. Change transport or security'
+    exit 1
+  fi
   if [[ ${config[security]} == 'letsencrypt' && ${config[port]} -ne 443 ]]; then
     if lsof -i :80 >/dev/null 2>&1; then
       free_80=false
@@ -748,8 +752,8 @@ services:
     $([[ ${config[security]} == 'reality' || ${config[transport]} == 'shadowtls' ]] && echo "ports:" || true)
     $([[ (${config[security]} == 'reality' || ${config[transport]} == 'shadowtls') && ${config[port]} -eq 443 ]] && echo '- 80:8080' || true)
     $([[ ${config[security]} == 'reality' || ${config[transport]} == 'shadowtls' ]] && echo "- ${config[port]}:8443" || true)
-    $([[ ${config[transport]} == 'tuic' || ${config[transport]} == 'hysteria2' ]] && echo "ports:" || true)
-    $([[ ${config[transport]} == 'tuic' || ${config[transport]} == 'hysteria2' ]] && echo "- ${config[port]}:8443/udp" || true)
+    $([[ ${config[security]} != 'reality' && ${config[transport]} != 'shadowtls' && (${config[transport]} == 'tuic' || ${config[transport]} == 'hysteria2') ]] && echo "ports:" || true)
+    $([[ ${config[security]} != 'reality' && ${config[transport]} != 'shadowtls' && (${config[transport]} == 'tuic' || ${config[transport]} == 'hysteria2') ]] && echo "- ${config[port]}:8443/udp" || true)
     $([[ ${config[security]} != 'reality' && ${config[transport]} != 'shadowtls' ]] && echo "expose:" || true)
     $([[ ${config[security]} != 'reality' && ${config[transport]} != 'shadowtls' ]] && echo "- 8443" || true)
     restart: always
@@ -1113,7 +1117,7 @@ function generate_engine_config {
       "listen_port": 8443,
       "tcp_multi_path": true,
       "users": [${users_object}],
-      "multiplex": { "enabled": true, "padding": true, "brutal": {"enabled": false, "up_mbps": 1000, "down_mbps": 100} },
+      $([[ ${config[transport]} != 'tuic' && ${config[transport]} != 'hysteria2' && ${config[transport]} != 'shadowtls' ]] && echo '"multiplex": { "enabled": true, "padding": true, "brutal": {"enabled": false, "up_mbps": 1000, "down_mbps": 100} },' || true)
       $(if [[ ${config[security]} == 'reality' && ${config[transport]} != 'shadowtls' ]]; then
         echo "${reality_object}"
       elif [[ ${config[transport]} == 'http' || ${config[transport]} == 'tcp' || ${config[transport]} == 'tuic' || ${config[transport]} == 'hysteria2' ]]; then
@@ -1500,7 +1504,7 @@ function print_client_configuration {
     client_config="${client_config}$([[ ${config[security]} == 'selfsigned' ]] && echo "&insecure=1" || true)"
     client_config="${client_config}#${username}"
   elif [[ ${config[transport]} == 'shadowtls' ]]; then
-    client_config='{"dns":{"rules":[{"domain":["dns.google"],"server":"dns-direct"}],"servers":[{"address":"https://dns.google/dns-query","address_resolver":"dns-direct","strategy":"ipv4_only","tag":"dns-remote"},{"address":"local","address_resolver":"dns-local","detour":"direct","strategy":"ipv4_only","tag":"dns-direct"},{"address":"local","detour":"direct","tag":"dns-local"},{"address":"rcode://success","tag":"dns-block"}]},"inbounds":[{"listen":"127.0.0.1","listen_port":6450,"override_address":"8.8.8.8","override_port":53,"tag":"dns-in","type":"direct"},{"endpoint_independent_nat":true,"inet4_address":["172.19.0.1/28"],"mtu":9000,"stack":"mixed","tag":"tun-in","auto_route":true,"type":"tun"},{"listen":"127.0.0.1","listen_port":2080,"tag":"mixed-in","type":"mixed"}],"log":{"level":"warning"},"outbounds":[{"method":"chacha20-ietf-poly1305","password":"'"${users[${username}]}"'","server":"127.0.0.1","server_port":1080,"type":"shadowsocks","udp_over_tcp":true,"tag":"proxy","detour":"shadowtls"},{"password":"'"${users[${username}]}"'","server":"'"${config[server]}"'","server_port":'"${config[port]}"',"tls":{"enabled":true,"insecure":false,"server_name":"'"${config[domain]%%:*}"'","utls":{"enabled":true,"fingerprint":"chrome"}},"version":3,"type":"shadowtls","tag":"shadowtls"},{"tag":"direct","type":"direct"},{"tag":"bypass","type":"direct"},{"tag":"block","type":"block"},{"tag":"dns-out","type":"dns"}],"route":{"auto_detect_interface":true,"rule_set":[],"rules":[{"outbound":"dns-out","port":[53]},{"inbound":["dns-in"],"outbound":"dns-out"},{"ip_cidr":["224.0.0.0/3","ff00::/8"],"outbound":"block","source_ip_cidr":["224.0.0.0/3","ff00::/8"]}]}}'
+    client_config='{"dns":{"servers":[{"type":"https","tag":"dns-remote","server":"1.1.1.1","server_port":443,"detour":"proxy"},{"type":"local","tag":"dns-direct","detour":"direct"}],"strategy":"prefer_ipv4"},"inbounds":[{"type":"mixed","tag":"mixed-in","listen":"127.0.0.1","listen_port":2080},{"type":"tun","tag":"tun-in","address":["172.19.0.1/28"],"mtu":9000,"stack":"mixed","auto_route":true}],"log":{"level":"warning"},"outbounds":[{"type":"shadowsocks","tag":"proxy","server":"127.0.0.1","server_port":1080,"method":"chacha20-ietf-poly1305","password":"'"${users[${username}]}"'","udp_over_tcp":{"enabled":true,"version":2},"detour":"shadowtls"},{"type":"shadowtls","tag":"shadowtls","server":"'"${config[server]}"'","server_port":'"${config[port]}"',"version":3,"password":"'"${users[${username}]}"'","tls":{"enabled":true,"server_name":"'"${config[domain]%%:*}"'","utls":{"enabled":true,"fingerprint":"chrome"}}},{"type":"direct","tag":"direct"},{"type":"block","tag":"block"}],"route":{"auto_detect_interface":true,"default_domain_resolver":"dns-direct","final":"proxy","rules":[{"action":"sniff"},{"protocol":"dns","action":"hijack-dns"},{"ip_cidr":["224.0.0.0/3","ff00::/8"],"action":"reject"}]}}'
   else
     client_config="vless://"
     client_config="${client_config}${users[${username}]}"
@@ -1512,7 +1516,7 @@ function print_client_configuration {
     client_config="${client_config}&headerType=none"
     client_config="${client_config}&fp=chrome"
     client_config="${client_config}&type=$([[ ${config[core]} == 'xray' && ${config[transport]} == 'http' ]] && echo 'xhttp' || echo "${config[transport]}")"
-    client_config="${client_config}&flow=$([[ ${config[transport]} == 'tcp' ]] && echo 'xtls-rprx-vision' || true)"
+    client_config="${client_config}$([[ ${config[core]} == 'xray' && ${config[transport]} == 'tcp' ]] && echo '&flow=xtls-rprx-vision' || true)"
     client_config="${client_config}&sni=${config[domain]%%:*}"
     client_config="${client_config}$([[ ${config[transport]} == 'ws' || ${config[transport]} == 'http' ]] && echo "&host=${config[server]}" || true)"
     client_config="${client_config}$([[ ${config[security]} == 'reality' ]] && echo "&pbk=${config[public_key]}" || true)"
@@ -1753,7 +1757,7 @@ Remarks: ${username}
 Address: ${config[server]}
 Port: ${config[port]}
 ID: ${users[$username]}
-Flow: $([[ ${config[transport]} == 'tcp' ]] && echo 'xtls-rprx-vision' || true)
+Flow: $([[ ${config[core]} == 'xray' && ${config[transport]} == 'tcp' ]] && echo 'xtls-rprx-vision' || true)
 Network: ${config[transport]}
 $([[ ${config[transport]} == 'ws' || ${config[transport]} == 'http' ]] && echo "Host Header: ${config[server]}" || true)
 $([[ ${config[transport]} == 'ws' || ${config[transport]} == 'http' ]] && echo "Path: /${config[service_path]}" || true)
@@ -2031,8 +2035,8 @@ function config_transport_menu {
       message_box 'Invalid Configuration' 'You cannot use "tuic" transport with "xray" core. Use other transports or change core to "sing-box"'
       continue
     fi
-    if [[ ${transport} == 'hysteria2' && ${config[security]} == 'reality' ]]; then
-      message_box 'Invalid Configuration' 'You cannot use "hysteria2" transport with "reality" TLS certificate. Use other transports or change TLS certifcate to "letsencrypt" or "selfsigned"'
+    if [[ (${transport} == 'tuic' || ${transport} == 'hysteria2') && ${config[security]} == 'reality' ]]; then
+      message_box 'Invalid Configuration' 'You cannot use "tuic" or "hysteria2" transport with "reality" TLS certificate. Use other transports or change TLS certifcate to "letsencrypt" or "selfsigned"'
       continue
     fi
     if [[ ${transport} == 'hysteria2' && ${config[core]} == 'xray' ]]; then
