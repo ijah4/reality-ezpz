@@ -1196,8 +1196,7 @@ function generate_engine_config {
       elif [[ ${config[transport]} == 'shadowtls' ]]; then
         users_object=${users_object}'{"password": "'"${users[${user}]}"'", "name": "'"${user}"'"}'
       else
-        #users_object=${users_object}'{"uuid": "'"${users[${user}]}"'", "flow": "'"$([[ ${config[transport]} == 'tcp' ]] && echo 'xtls-rprx-vision' || true)"'", "name": "'"${user}"'"}'
-        users_object=${users_object}'{"uuid": "'"${users[${user}]}"'", "flow": "", "name": "'"${user}"'"}'
+        users_object=${users_object}'{"uuid": "'"${users[${user}]}"'", "flow": "'"$([[ ${config[transport]} == 'tcp' ]] && echo 'xtls-rprx-vision' || true)"'", "name": "'"${user}"'"}'
       fi
     done
     cat >"${path[engine]}" <<EOF
@@ -1674,7 +1673,7 @@ function print_client_configuration {
     client_config="${client_config}&headerType=none"
     client_config="${client_config}&fp=chrome"
     client_config="${client_config}&type=$([[ ${config[core]} == 'xray' && ${config[transport]} == 'http' ]] && echo 'xhttp' || echo "${config[transport]}")"
-    client_config="${client_config}$([[ ${config[core]} == 'xray' && ${config[transport]} == 'tcp' ]] && echo '&flow=xtls-rprx-vision' || true)"
+    client_config="${client_config}$([[ ${config[transport]} == 'tcp' ]] && echo '&flow=xtls-rprx-vision' || true)"
     client_config="${client_config}&sni=${config[domain]%%:*}"
     client_config="${client_config}$([[ ${config[transport]} == 'ws' || ${config[transport]} == 'http' ]] && echo "&host=${config[server]}" || true)"
     client_config="${client_config}$([[ ${config[security]} == 'reality' ]] && echo "&pbk=${config[public_key]}" || true)"
@@ -1915,7 +1914,7 @@ Remarks: ${username}
 Address: ${config[server]}
 Port: ${config[port]}
 ID: ${users[$username]}
-Flow: $([[ ${config[core]} == 'xray' && ${config[transport]} == 'tcp' ]] && echo 'xtls-rprx-vision' || true)
+Flow: $([[ ${config[transport]} == 'tcp' ]] && echo 'xtls-rprx-vision' || true)
 Network: ${config[transport]}
 $([[ ${config[transport]} == 'ws' || ${config[transport]} == 'http' ]] && echo "Host Header: ${config[server]}" || true)
 $([[ ${config[transport]} == 'ws' || ${config[transport]} == 'http' ]] && echo "Path: /${config[service_path]}" || true)
