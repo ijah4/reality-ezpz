@@ -34,6 +34,10 @@ compose_project='reality-ezpz'
 tgbot_project='tgbot'
 script_url='https://raw.githubusercontent.com/aleskxyz/reality-ezpz/master/reality-ezpz.sh'
 tgbot_script_url='https://raw.githubusercontent.com/aleskxyz/reality-ezpz/master/tgbot.py'
+# The engine container runs as this uid/gid. The TLS key is bind-mounted read-only
+# from the host, so its ownership has to match or the engine exits at startup.
+engine_uid='65532'
+engine_gid='65532'
 BACKTITLE=RealityEZPZ
 MENU="Select an option:"
 HEIGHT=30
@@ -747,7 +751,7 @@ services:
     $([[ ${config[security]} != 'reality' && ${config[transport]} != 'shadowtls' ]] && echo "expose:" || true)
     $([[ ${config[security]} != 'reality' && ${config[transport]} != 'shadowtls' ]] && echo "- 8443" || true)
     restart: always
-    user: "65532:65532"
+    user: "${engine_uid}:${engine_gid}"
     read_only: true
     cap_drop: [ALL]
     security_opt:
@@ -957,6 +961,12 @@ renewed_path=/etc/letsencrypt/live/\$domain
 cat "\$renewed_path/fullchain.pem" > "\$cert_path/server.crt"
 cat "\$renewed_path/privkey.pem" > "\$cert_path/server.key"
 cat "\$renewed_path/fullchain.pem" "\$renewed_path/privkey.pem" > "\$cert_path/server.pem"
+# The engine mounts server.key read-only and runs as ${engine_uid}:${engine_gid}, so
+# the renewed key has to stay owned by that uid. chmod also matters: cat > creates a
+# fresh file with the container umask, which would leave the key world-readable.
+chown ${engine_uid}:${engine_gid} "\$cert_path/server.key"
+chmod 600 "\$cert_path/server.key"
+chmod 644 "\$cert_path/server.crt" "\$cert_path/server.pem"
 i=4
 while [ \$i -le \$# ]; do
   eval service=\\\${\$i}
@@ -1029,6 +1039,25 @@ function generate_selfsigned_certificate {
   openssl x509 -req -days 365 -in /tmp/server.csr -signkey "${path[server_key]}" -out "${path[server_crt]}"
   cat "${path[server_key]}" "${path[server_crt]}" > "${path[server_pem]}"
   rm -f /tmp/server.csr
+}
+
+# The engine container runs as ${engine_uid}:${engine_gid} and bind-mounts server.key
+# read-only, while the key itself is written by root here and by the certbot
+# deployhook on renewal. Without this the engine crash-loops on
+# "read key: open /etc/sing-box/server.key: permission denied".
+# server.pem carries the same private key but is read by the haproxy container, whose
+# uid differs, so it stays as readable as it was before.
+function fix_certificate_permissions {
+  if [[ ! -e "${path[server_key]}" ]]; then
+    return 0
+  fi
+  if ! chown "${engine_uid}:${engine_gid}" "${path[server_key]}"; then
+    echo "Warning: cannot give ${path[server_key]} to ${engine_uid}:${engine_gid}, the engine container will not be able to read its TLS key" >&2
+  fi
+  chmod 600 "${path[server_key]}"
+  [[ -e "${path[server_crt]}" ]] && chmod 644 "${path[server_crt]}"
+  [[ -e "${path[server_pem]}" ]] && chmod 644 "${path[server_pem]}"
+  return 0
 }
 
 function generate_engine_config {
@@ -1488,6 +1517,7 @@ function generate_config {
     if [[ ! -r "${path[server_pem]}" || ! -r "${path[server_crt]}" || ! -r "${path[server_key]}" ]]; then
       generate_selfsigned_certificate
     fi
+    fix_certificate_permissions
   fi
   if [[ ${config[security]} == "letsencrypt" && ${config[transport]} != 'shadowtls' ]]; then
     mkdir -p "${config_path}/certbot"
