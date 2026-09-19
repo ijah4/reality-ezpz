@@ -36,6 +36,11 @@ tgbot_project='tgbot'
 # from the host, so its ownership has to match or the engine exits at startup.
 engine_uid='65532'
 engine_gid='65532'
+# The engine downloads these itself, and it does so before its WireGuard endpoint is usable,
+# which makes a cold cache fatal whenever WARP is the final outbound. The script keeps a
+# copy on the host instead and points the rule-sets at it with initial_path.
+rule_set_url='https://raw.githubusercontent.com/aleskxyz/sing-box-rules/refs/heads/rule-set'
+rule_set_tags=(block geosite-nsfw geoip-private geosite-private bypass)
 BACKTITLE=RealityEZPZ
 MENU="Select an option:"
 HEIGHT=30
@@ -761,6 +766,7 @@ services:
       TZ: Etc/UTC
     volumes:
     - ./${path[engine]#${config_path}/}:/etc/${config[core]}/config.json:ro
+    $(rule_sets_available && echo "- ./${path[rules]#${config_path}/}:/etc/${config[core]}/rules:ro" || true)
     $([[ ${config[security]} != 'reality' ]] && { [[ ${config[transport]} == 'http' ]] || [[ ${config[transport]} == 'tcp' ]] || [[ ${config[transport]} == 'tuic' ]] || [[ ${config[transport]} == 'hysteria2' ]]; } && echo "- ./${path[server_crt]#${config_path}/}:/etc/${config[core]}/server.crt:ro" || true)
     $([[ ${config[security]} != 'reality' ]] && { [[ ${config[transport]} == 'http' ]] || [[ ${config[transport]} == 'tcp' ]] || [[ ${config[transport]} == 'tuic' ]] || [[ ${config[transport]} == 'hysteria2' ]]; } && echo "- ./${path[server_key]#${config_path}/}:/etc/${config[core]}/server.key:ro" || true)
     networks:
@@ -1282,31 +1288,36 @@ function generate_engine_config {
         "tag": "block",
         "type": "remote",
         "format": "binary",
-        "url": "https://raw.githubusercontent.com/aleskxyz/sing-box-rules/refs/heads/rule-set/block.srs"
+        $(rule_set_initial_path block)
+        "url": "${rule_set_url}/block.srs"
       },
       {
         "tag": "nsfw",
         "type": "remote",
         "format": "binary",
-        "url": "https://raw.githubusercontent.com/aleskxyz/sing-box-rules/refs/heads/rule-set/geosite-nsfw.srs"
+        $(rule_set_initial_path geosite-nsfw)
+        "url": "${rule_set_url}/geosite-nsfw.srs"
       },
       {
         "tag": "geoip-private",
         "type": "remote",
         "format": "binary",
-        "url": "https://raw.githubusercontent.com/aleskxyz/sing-box-rules/refs/heads/rule-set/geoip-private.srs"
+        $(rule_set_initial_path geoip-private)
+        "url": "${rule_set_url}/geoip-private.srs"
       },
       {
         "tag": "geosite-private",
         "type": "remote",
         "format": "binary",
-        "url": "https://raw.githubusercontent.com/aleskxyz/sing-box-rules/refs/heads/rule-set/geosite-private.srs"
+        $(rule_set_initial_path geosite-private)
+        "url": "${rule_set_url}/geosite-private.srs"
       },
       {
         "tag": "bypass",
         "type": "remote",
         "format": "binary",
-        "url": "https://raw.githubusercontent.com/aleskxyz/sing-box-rules/refs/heads/rule-set/bypass.srs"
+        $(rule_set_initial_path bypass)
+        "url": "${rule_set_url}/bypass.srs"
       }
     ],
     "rules": [
@@ -1547,7 +1558,57 @@ EOF
   fi
 }
 
+# True when at least one rule-set copy is on disk, so an empty ./rules is never bind-mounted
+# over /etc/<core>/rules.
+function rule_sets_available {
+  local file
+  for file in "${path[rules]}"/*.srs; do
+    if [[ -s "${file}" ]]; then
+      return 0
+    fi
+  done
+  return 1
+}
+
+# Only emitted when the copy is actually there. Without it the engine falls back to fetching
+# the rule-set itself, which is exactly the behaviour that fails at startup.
+function rule_set_initial_path {
+  local tag="$1"
+  if [[ -s "${path[rules]}/${tag}.srs" ]]; then
+    echo "\"initial_path\": \"/etc/${config[core]}/rules/${tag}.srs\","
+  fi
+  return 0
+}
+
+# The engine fetches remote rule-sets while it is starting, and that fetch happens before the
+# WireGuard endpoint can carry traffic: rule-sets are fetched at StartStateStart
+# (route/router.go:135) while the endpoint only marks itself ready at StartStatePostStart
+# (protocol/wireguard/endpoint.go:141-146). With "final": "warp" the implicit default HTTP
+# client dials through that endpoint, so a cold cache fails every start with "WireGuard is not
+# ready yet", and the cache sits in a tmpfs, so it is cold on every container recreate.
+# Keeping a copy here and pointing initial_path at it takes the network out of startup; the
+# rule-set updater still refreshes them in the background once the endpoint is up.
+function download_rule_sets {
+  local tag
+  mkdir -p "${path[rules]}"
+  for tag in "${rule_set_tags[@]}"; do
+    if [[ -s "${path[rules]}/${tag}.srs" ]]; then
+      continue
+    fi
+    if curl -fsSL --retry 3 --connect-timeout 10 -o "${path[rules]}/${tag}.srs" "${rule_set_url}/${tag}.srs"; then
+      chmod 644 "${path[rules]}/${tag}.srs"
+    else
+      rm -f "${path[rules]}/${tag}.srs"
+      echo "Warning: could not download rule-set ${tag}; the engine will fetch it at startup" >&2
+    fi
+  done
+  return 0
+}
+
 function generate_config {
+  if [[ ${config[core]} == 'sing-box' ]]; then
+    download_rule_sets
+  fi
   generate_docker_compose
   generate_engine_config
   if [[ ${config[security]} != "reality" && ${config[transport]} != 'shadowtls' ]]; then
@@ -2655,6 +2716,7 @@ function generate_file_list {
   path[tgbot_script]="${config_path}/tgbot/tgbot.py"
   path[tgbot_dockerfile]="${config_path}/tgbot/Dockerfile"
   path[tgbot_compose]="${config_path}/tgbot/docker-compose.yml"
+  path[rules]="${config_path}/rules"
 
   service[config]='none'
   service[users]='none'
@@ -2670,6 +2732,7 @@ function generate_file_list {
   service[tgbot_script]='tgbot'
   service[tgbot_dockerfile]='compose'
   service[tgbot_compose]='tgbot'
+  service[rules]='engine'
 
   for key in "${!path[@]}"; do
     md5["$key"]=$(get_md5 "${path[$key]}")
