@@ -7,9 +7,9 @@
 # to you under the Apache License, Version 2.0 (the
 # "License"); you may not use this file except in compliance
 # with the License.  You may obtain a copy of the License at
-# 
+#
 #   http://www.apache.org/licenses/LICENSE-2.0
-# 
+#
 # Unless required by applicable law or agreed to in writing,
 # software distributed under the License is distributed on an
 # "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
@@ -132,7 +132,7 @@ function show_help {
   echo "      --enable-warp <true|false> Enable or disable Cloudflare warp"
   echo "      --warp-license <warp-license> Add Cloudflare warp+ license"
   echo "  -c  --core <sing-box|xray> Select core (xray, sing-box, default: ${defaults[core]})"
-  echo "      --security <reality|letsencrypt|selfsigned> Select type of TLS encryption (reality, letsencrypt, selfsigned, default: ${defaults[security]})" 
+  echo "      --security <reality|letsencrypt|selfsigned> Select type of TLS encryption (reality, letsencrypt, selfsigned, default: ${defaults[security]})"
   echo "  -m  --menu                Show menu"
   echo "      --enable-tgbot <true|false> Enable Telegram bot for user management"
   echo "      --tgbot-token <token> Token of Telegram bot"
@@ -290,7 +290,7 @@ function parse_args {
         if [[ ! ${args[tgbot_token]} =~ ${regex[tgbot_token]} ]]; then
           echo "Invalid Telegram Bot Token: ${args[tgbot_token]}"
           return 1
-        fi 
+        fi
         if ! curl -sSfL -m 3 "https://api.telegram.org/bot${args[tgbot_token]}/getMe" >/dev/null 2>&1; then
           echo "Invalid Telegram Bot Token: Telegram Bot Token is incorrect. Check it again."
           return 1
@@ -614,7 +614,7 @@ function build_config {
   if [[ -n "${args[security]}" && "${args[security]}" != 'reality' && "${config_file[security]}" == 'reality' && "${config_file[transport]}" != 'shadowtls' ]]; then
     config[domain]="${config[server]}"
   fi
-  
+
   if [[ -n "${args[transport]}" && "${args[transport]}" == 'shadowtls' && "${config_file[transport]}" != 'shadowtls' && "${config_file[security]}" != 'reality' ]]; then
     config[domain]="${defaults[domain]}"
   fi
@@ -647,7 +647,7 @@ function build_config {
       config[warp_license]=""
       echo "WARP+ license error! Please check your license and try again."
       exit 1
-    fi 
+    fi
   fi
 }
 
@@ -697,7 +697,7 @@ function uninstall {
 }
 
 function install_packages {
-  if [[ -n $BOT_TOKEN ]]; then 
+  if [[ -n $BOT_TOKEN ]]; then
     return 0
   fi
   if ! which qrencode whiptail jq xxd zip unzip >/dev/null 2>&1; then
@@ -1263,7 +1263,7 @@ function generate_engine_config {
     },
     {
       "type": "${type}",
-      "tag": "in",	
+      "tag": "in",
       "listen": "::",
       "listen_port": 8443,
       "tcp_multi_path": true,
@@ -1283,7 +1283,7 @@ function generate_engine_config {
       fi
       if [[ ${config[transport]} == grpc ]]; then
       echo ',"transport": {"type": "grpc","service_name": "'"${config[service_path]}"'"}'
-      fi 
+      fi
       if [[ ${config[transport]} == ws ]]; then
       echo ',"transport": {"type": "ws", "headers": {"Host": "'"${config[server]}"'"}, "path": "/'"${config[service_path]}"'"}'
       fi
@@ -2493,7 +2493,7 @@ function config_tgbot_menu {
       if [[ ! $tgbot_token =~ ${regex[tgbot_token]} ]]; then
         message_box "Invalid Input" "Invalid Telegram Bot Token"
         continue
-      fi 
+      fi
       if ! curl -sSfL -m 3 "https://api.telegram.org/bot${tgbot_token}/getMe" >/dev/null 2>&1; then
         message_box "Invalid Input" "Telegram Bot Token is incorrect. Check it again."
         continue
