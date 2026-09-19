@@ -36,11 +36,13 @@ tgbot_project='tgbot'
 # from the host, so its ownership has to match or the engine exits at startup.
 engine_uid='65532'
 engine_gid='65532'
-# The engine downloads these itself, and it does so before its WireGuard endpoint is usable,
-# which makes a cold cache fatal whenever WARP is the final outbound. The script keeps a
-# copy on the host instead and points the rule-sets at it with initial_path.
+# Config tag -> file name in that repository; "nsfw" is published as geosite-nsfw.srs.
 rule_set_url='https://raw.githubusercontent.com/aleskxyz/sing-box-rules/refs/heads/rule-set'
-rule_set_tags=(block geosite-nsfw geoip-private geosite-private bypass)
+rule_set_tags=(block nsfw geoip-private geosite-private bypass)
+rule_set_files=(block geosite-nsfw geoip-private geosite-private bypass)
+# The engine reads the local copies and no longer refreshes them, so this script does, once they
+# are older than this many days.
+rule_set_max_age_days=7
 BACKTITLE=RealityEZPZ
 MENU="Select an option:"
 HEIGHT=30
@@ -1283,41 +1285,7 @@ function generate_engine_config {
   "route": {
     "final": "$([[ ${config[warp]} == ON ]] && echo "warp" || echo "internet")",
     "rule_set": [
-      {
-        "tag": "block",
-        "type": "remote",
-        "format": "binary",
-        $(rule_set_initial_path block)
-        "url": "${rule_set_url}/block.srs"
-      },
-      {
-        "tag": "nsfw",
-        "type": "remote",
-        "format": "binary",
-        $(rule_set_initial_path geosite-nsfw)
-        "url": "${rule_set_url}/geosite-nsfw.srs"
-      },
-      {
-        "tag": "geoip-private",
-        "type": "remote",
-        "format": "binary",
-        $(rule_set_initial_path geoip-private)
-        "url": "${rule_set_url}/geoip-private.srs"
-      },
-      {
-        "tag": "geosite-private",
-        "type": "remote",
-        "format": "binary",
-        $(rule_set_initial_path geosite-private)
-        "url": "${rule_set_url}/geosite-private.srs"
-      },
-      {
-        "tag": "bypass",
-        "type": "remote",
-        "format": "binary",
-        $(rule_set_initial_path bypass)
-        "url": "${rule_set_url}/bypass.srs"
-      }
+$(generate_rule_set_object)
     ],
     "rules": [
       {
@@ -1557,50 +1525,92 @@ EOF
   fi
 }
 
-# True when at least one rule-set copy is on disk, so an empty ./rules is never bind-mounted
-# over /etc/<core>/rules.
+# The engine loads a local rule-set fatally -- a truncated file or a saved error page stops the
+# whole service from starting -- so a copy is only used once it has the .srs magic
+# (sing-box common/srs/binary.go:23).
+function rule_set_file_valid {
+  local file="$1"
+  if [[ ! -s "${file}" ]]; then
+    return 1
+  fi
+  [[ "$(head -c 3 "${file}" 2>/dev/null)" == 'SRS' ]]
+}
+
+function rule_set_file_fresh {
+  local file="$1"
+  if ! rule_set_file_valid "${file}"; then
+    return 1
+  fi
+  [[ -z "$(find "${file}" -mtime "+${rule_set_max_age_days}" 2>/dev/null)" ]]
+}
+
+# True when at least one copy can be used, so an empty ./rules is never bind-mounted over
+# /etc/<core>/rules.
 function rule_sets_available {
   local file
-  for file in "${path[rules]}"/*.srs; do
-    if [[ -s "${file}" ]]; then
+  for file in "${rule_set_files[@]}"; do
+    if rule_set_file_valid "${path[rules]}/${file}.srs"; then
       return 0
     fi
   done
   return 1
 }
 
-# Only emitted when the copy is actually there. Without it the engine falls back to fetching
-# the rule-set itself, which is exactly the behaviour that fails at startup.
-function rule_set_initial_path {
-  local tag="$1"
-  if [[ -s "${path[rules]}/${tag}.srs" ]]; then
-    echo "\"initial_path\": \"/etc/${config[core]}/rules/${tag}.srs\","
-  fi
+# The engine used to fetch these itself, and that fetch happens before its WireGuard endpoint
+# can carry traffic: rule-sets are fetched at StartStateStart (route/router.go:135) while the
+# endpoint only marks itself ready at StartStatePostStart
+# (protocol/wireguard/endpoint.go:141-146). With "final": "warp" the implicit default HTTP
+# client dials through that endpoint, so a cold cache failed every start with "WireGuard is not
+# ready yet", and the cache sits in a tmpfs, so it was cold on every container recreate.
+# Reading the copies instead takes the network out of startup entirely, which leaves refreshing
+# them to this script -- hence rule_set_max_age_days. Downloads land in a temporary file and are
+# checked before they replace anything, so a failed refresh keeps the previous copy rather than
+# leaving a hole the engine would refuse to start on.
+function download_rule_sets {
+  local index tag file target
+  mkdir -p "${path[rules]}"
+  for index in "${!rule_set_tags[@]}"; do
+    tag="${rule_set_tags[${index}]}"
+    file="${rule_set_files[${index}]}"
+    target="${path[rules]}/${file}.srs"
+    if rule_set_file_fresh "${target}"; then
+      continue
+    fi
+    if curl -fsSL --retry 3 --connect-timeout 10 -o "${target}.tmp" "${rule_set_url}/${file}.srs" &&
+      rule_set_file_valid "${target}.tmp"; then
+      chmod 644 "${target}.tmp"
+      mv -f "${target}.tmp" "${target}"
+    else
+      rm -f "${target}.tmp"
+      if rule_set_file_valid "${target}"; then
+        echo "Warning: could not refresh rule-set ${tag}, keeping the copy already on disk" >&2
+      else
+        echo "Warning: could not download rule-set ${tag}; the engine will have to fetch it at startup" >&2
+      fi
+    fi
+  done
   return 0
 }
 
-# The engine fetches remote rule-sets while it is starting, and that fetch happens before the
-# WireGuard endpoint can carry traffic: rule-sets are fetched at StartStateStart
-# (route/router.go:135) while the endpoint only marks itself ready at StartStatePostStart
-# (protocol/wireguard/endpoint.go:141-146). With "final": "warp" the implicit default HTTP
-# client dials through that endpoint, so a cold cache fails every start with "WireGuard is not
-# ready yet", and the cache sits in a tmpfs, so it is cold on every container recreate.
-# Keeping a copy here and pointing initial_path at it takes the network out of startup; the
-# rule-set updater still refreshes them in the background once the endpoint is up.
-function download_rule_sets {
-  local tag
-  mkdir -p "${path[rules]}"
-  for tag in "${rule_set_tags[@]}"; do
-    if [[ -s "${path[rules]}/${tag}.srs" ]]; then
-      continue
+# A tag whose copy is on disk is read locally; one without a copy falls back to being fetched,
+# which is the behaviour this script had before it kept copies at all.
+function generate_rule_set_object {
+  local index tag file
+  for index in "${!rule_set_tags[@]}"; do
+    tag="${rule_set_tags[${index}]}"
+    file="${rule_set_files[${index}]}"
+    if [[ ${index} -gt 0 ]]; then
+      printf ',\n'
     fi
-    if curl -fsSL --retry 3 --connect-timeout 10 -o "${path[rules]}/${tag}.srs" "${rule_set_url}/${tag}.srs"; then
-      chmod 644 "${path[rules]}/${tag}.srs"
+    if rule_set_file_valid "${path[rules]}/${file}.srs"; then
+      printf '      {\n        "tag": "%s",\n        "type": "local",\n        "format": "binary",\n        "path": "/etc/%s/rules/%s.srs"\n      }' \
+        "${tag}" "${config[core]}" "${file}"
     else
-      rm -f "${path[rules]}/${tag}.srs"
-      echo "Warning: could not download rule-set ${tag}; the engine will fetch it at startup" >&2
+      printf '      {\n        "tag": "%s",\n        "type": "remote",\n        "format": "binary",\n        "url": "%s/%s.srs"\n      }' \
+        "${tag}" "${rule_set_url}" "${file}"
     fi
   done
+  printf '\n'
   return 0
 }
 
