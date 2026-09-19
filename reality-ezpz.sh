@@ -757,8 +757,8 @@ services:
     security_opt:
     - no-new-privileges:true
     tmpfs:
-    - /tmp
-    - /var/cache/sing-box
+    - /tmp:mode=1777
+    - /var/cache/sing-box:mode=1777
     environment:
       TZ: Etc/UTC
     volumes:
