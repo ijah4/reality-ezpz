@@ -1060,6 +1060,33 @@ function fix_certificate_permissions {
   return 0
 }
 
+# The reality private key, the WARP device credentials, the Telegram bot token, the
+# obfs/shadowtls password and every user UUID all land in ${path[config]} and
+# ${path[users]}. Both are written with the ambient umask -- 0644 under a default
+# root shell -- and update_users_file rebuilds the users file from scratch on every
+# change, so the mode has to be reapplied on each run rather than once at install.
+# Nothing outside the script reads either file, so 600 is enough.
+# engine.conf is the exception: the engine container reads it, so it is handed to the
+# engine uid instead of being left root-only.
+function fix_credential_permissions {
+  local file
+  for file in "${path[config]}" "${path[users]}" "${path[tgbot_compose]}"; do
+    if [[ -e "${file}" ]]; then
+      chmod 600 "${file}"
+    fi
+  done
+  if [[ -e "${path[engine]}" ]]; then
+    if chown "${engine_uid}:${engine_gid}" "${path[engine]}"; then
+      chmod 600 "${path[engine]}"
+    else
+      # A readable config beats an engine that cannot start.
+      echo "Warning: cannot give ${path[engine]} to ${engine_uid}:${engine_gid}, leaving it readable" >&2
+      chmod 644 "${path[engine]}"
+    fi
+  fi
+  return 0
+}
+
 function generate_engine_config {
   local type="vless"
   local users_object=""
@@ -1532,6 +1559,7 @@ function generate_config {
     pin_installer_script
     download_tgbot_script
   fi
+  fix_credential_permissions
 }
 
 function get_ipv6 {
