@@ -1252,12 +1252,6 @@ function generate_engine_config {
       "tag": "block"
     }
   ],
-  "http_clients": [
-    {
-      "tag": "internet",
-      "detour": "internet"
-    }
-  ],
   "route": {
     "final": "$([[ ${config[warp]} == ON ]] && echo "warp" || echo "internet")",
     "rule_set": [
@@ -1265,36 +1259,31 @@ function generate_engine_config {
         "tag": "block",
         "type": "remote",
         "format": "binary",
-        "url": "https://raw.githubusercontent.com/aleskxyz/sing-box-rules/refs/heads/rule-set/block.srs",
-        "http_client": "internet"
+        "url": "https://raw.githubusercontent.com/aleskxyz/sing-box-rules/refs/heads/rule-set/block.srs"
       },
       {
         "tag": "nsfw",
         "type": "remote",
         "format": "binary",
-        "url": "https://raw.githubusercontent.com/aleskxyz/sing-box-rules/refs/heads/rule-set/geosite-nsfw.srs",
-        "http_client": "internet"
+        "url": "https://raw.githubusercontent.com/aleskxyz/sing-box-rules/refs/heads/rule-set/geosite-nsfw.srs"
       },
       {
         "tag": "geoip-private",
         "type": "remote",
         "format": "binary",
-        "url": "https://raw.githubusercontent.com/aleskxyz/sing-box-rules/refs/heads/rule-set/geoip-private.srs",
-        "http_client": "internet"
+        "url": "https://raw.githubusercontent.com/aleskxyz/sing-box-rules/refs/heads/rule-set/geoip-private.srs"
       },
       {
         "tag": "geosite-private",
         "type": "remote",
         "format": "binary",
-        "url": "https://raw.githubusercontent.com/aleskxyz/sing-box-rules/refs/heads/rule-set/geosite-private.srs",
-        "http_client": "internet"
+        "url": "https://raw.githubusercontent.com/aleskxyz/sing-box-rules/refs/heads/rule-set/geosite-private.srs"
       },
       {
         "tag": "bypass",
         "type": "remote",
         "format": "binary",
-        "url": "https://raw.githubusercontent.com/aleskxyz/sing-box-rules/refs/heads/rule-set/bypass.srs",
-        "http_client": "internet"
+        "url": "https://raw.githubusercontent.com/aleskxyz/sing-box-rules/refs/heads/rule-set/bypass.srs"
       }
     ],
     "rules": [
