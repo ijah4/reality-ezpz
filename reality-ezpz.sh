@@ -43,6 +43,8 @@ rule_set_files=(block geosite-nsfw geoip-private geosite-private bypass)
 # The engine reads the local copies and no longer refreshes them, so this script does, once they
 # are older than this many days.
 rule_set_max_age_days=7
+# A self-signed certificate is regenerated this long before it would expire.
+selfsigned_certificate_renew_before=2592000
 BACKTITLE=RealityEZPZ
 MENU="Select an option:"
 HEIGHT=30
@@ -1064,12 +1066,49 @@ function download_tgbot_script {
   exit 1
 }
 
+# The SAN is not optional: a certificate identified by CN alone is rejected outright by Go and
+# by every browser since Chrome 58, so without it the pair cannot be validated even by a client
+# that was given the certificate as trusted.
 function generate_selfsigned_certificate {
+  local extension_file=/tmp/server.ext
+  if [[ ${config[server]} =~ ${regex[ip]} ]]; then
+    echo "subjectAltName=IP:${config[server]}" > "${extension_file}"
+  else
+    echo "subjectAltName=DNS:${config[server]}" > "${extension_file}"
+  fi
   openssl ecparam -name prime256v1 -genkey -out "${path[server_key]}"
   openssl req -new -key "${path[server_key]}" -out /tmp/server.csr -subj "/CN=${config[server]}"
-  openssl x509 -req -days 365 -in /tmp/server.csr -signkey "${path[server_key]}" -out "${path[server_crt]}"
+  openssl x509 -req -days 365 -in /tmp/server.csr -signkey "${path[server_key]}" \
+    -extfile "${extension_file}" -out "${path[server_crt]}"
   cat "${path[server_key]}" "${path[server_crt]}" > "${path[server_pem]}"
-  rm -f /tmp/server.csr
+  rm -f /tmp/server.csr "${extension_file}"
+}
+
+# What is being served decides this, not what was configured. A letsencrypt install serves a
+# self-signed certificate until certbot issues one, and if certbot never succeeds it goes on
+# serving it, so a client that verifies normally fails against a server whose configuration
+# says letsencrypt.
+function certificate_is_selfsigned {
+  local issuer_hash subject_hash
+  if [[ ! -r "${path[server_crt]}" ]]; then
+    return 0
+  fi
+  issuer_hash=$(openssl x509 -noout -issuer_hash -in "${path[server_crt]}" 2>/dev/null) || return 0
+  subject_hash=$(openssl x509 -noout -subject_hash -in "${path[server_crt]}" 2>/dev/null) || return 0
+  [[ -n "${issuer_hash}" && "${issuer_hash}" == "${subject_hash}" ]]
+}
+
+# Regenerate when the pair is incomplete, or when it is the self-signed one and close to
+# expiring -- it is good for 365 days and nothing else replaces it on a selfsigned install.
+# A letsencrypt certificate is left alone: certbot owns its renewal.
+function selfsigned_certificate_needed {
+  if [[ ! -r "${path[server_crt]}" || ! -r "${path[server_key]}" || ! -r "${path[server_pem]}" ]]; then
+    return 0
+  fi
+  if ! certificate_is_selfsigned; then
+    return 1
+  fi
+  ! openssl x509 -noout -checkend "${selfsigned_certificate_renew_before}" -in "${path[server_crt]}" >/dev/null 2>&1
 }
 
 # The engine container runs as ${engine_uid}:${engine_gid} and bind-mounts server.key
@@ -1623,7 +1662,7 @@ function generate_config {
   if [[ ${config[security]} != "reality" && ${config[transport]} != 'shadowtls' ]]; then
     mkdir -p "${config_path}/certificate"
     generate_haproxy_config
-    if [[ ! -r "${path[server_pem]}" || ! -r "${path[server_crt]}" || ! -r "${path[server_key]}" ]]; then
+    if selfsigned_certificate_needed; then
       generate_selfsigned_certificate
     fi
     fix_certificate_permissions
@@ -1653,6 +1692,13 @@ function print_client_configuration {
   local client_config
   local ipv6
   local client_config_ipv6
+  if [[ ${config[security]} == 'letsencrypt' ]] && certificate_is_selfsigned; then
+    echo "Warning: certbot has not issued a certificate for ${config[server]}, so the server is"
+    echo "still using the self-signed one it started with. Clients have to allow an insecure"
+    echo "connection until that changes."
+    echo "Check why with: docker compose -p ${compose_project} logs certbot"
+    echo ""
+  fi
   if [[ ${config[transport]} == 'tuic' ]]; then
     client_config="tuic://"
     client_config="${client_config}${users[${username}]}"
@@ -1660,7 +1706,7 @@ function print_client_configuration {
     client_config="${client_config}@${config[server]}"
     client_config="${client_config}:${config[port]}"
     client_config="${client_config}/?congestion_control=bbr&udp_relay_mode=quic"
-    client_config="${client_config}$([[ ${config[security]} == 'selfsigned' ]] && echo "&allow_insecure=1" || true)"
+    client_config="${client_config}$(certificate_is_selfsigned && echo "&allow_insecure=1" || true)"
     client_config="${client_config}#${username}"
   elif [[ ${config[transport]} == 'hysteria2' ]]; then
     client_config="hy2://"
@@ -1668,7 +1714,7 @@ function print_client_configuration {
     client_config="${client_config}@${config[server]}"
     client_config="${client_config}:${config[port]}"
     client_config="${client_config}/?obfs=salamander&obfs-password=${config[service_path]}"
-    client_config="${client_config}$([[ ${config[security]} == 'selfsigned' ]] && echo "&insecure=1" || true)"
+    client_config="${client_config}$(certificate_is_selfsigned && echo "&insecure=1" || true)"
     client_config="${client_config}#${username}"
   elif [[ ${config[transport]} == 'shadowtls' ]]; then
     client_config='{"dns":{"servers":[{"type":"https","tag":"dns-remote","server":"1.1.1.1","server_port":443,"detour":"proxy"},{"type":"local","tag":"dns-direct","detour":"direct"}],"strategy":"prefer_ipv4"},"inbounds":[{"type":"mixed","tag":"mixed-in","listen":"127.0.0.1","listen_port":2080},{"type":"tun","tag":"tun-in","address":["172.19.0.1/28"],"mtu":9000,"stack":"mixed","auto_route":true}],"log":{"level":"warning"},"outbounds":[{"type":"shadowsocks","tag":"proxy","server":"127.0.0.1","server_port":1080,"method":"chacha20-ietf-poly1305","password":"'"${users[${username}]}"'","udp_over_tcp":{"enabled":true,"version":2},"detour":"shadowtls"},{"type":"shadowtls","tag":"shadowtls","server":"'"${config[server]}"'","server_port":'"${config[port]}"',"version":3,"password":"'"${users[${username}]}"'","tls":{"enabled":true,"server_name":"'"${config[domain]%%:*}"'","utls":{"enabled":true,"fingerprint":"chrome"}}},{"type":"direct","tag":"direct"},{"type":"block","tag":"block"}],"route":{"auto_detect_interface":true,"default_domain_resolver":"dns-direct","final":"proxy","rules":[{"action":"sniff"},{"protocol":"dns","action":"hijack-dns"},{"ip_cidr":["224.0.0.0/3","ff00::/8"],"action":"reject"}]}}'
@@ -1685,6 +1731,7 @@ function print_client_configuration {
     client_config="${client_config}&type=$([[ ${config[core]} == 'xray' && ${config[transport]} == 'http' ]] && echo 'xhttp' || echo "${config[transport]}")"
     client_config="${client_config}$([[ ${config[transport]} == 'tcp' ]] && echo '&flow=xtls-rprx-vision' || true)"
     client_config="${client_config}&sni=${config[domain]%%:*}"
+    client_config="${client_config}$([[ ${config[security]} != 'reality' ]] && certificate_is_selfsigned && echo '&allowInsecure=1' || true)"
     client_config="${client_config}$([[ ${config[transport]} == 'ws' || ${config[transport]} == 'http' ]] && echo "&host=${config[server]}" || true)"
     client_config="${client_config}$([[ ${config[security]} == 'reality' ]] && echo "&pbk=${config[public_key]}" || true)"
     client_config="${client_config}$([[ ${config[security]} == 'reality' ]] && echo "&sid=${config[short_id]}" || true)"
@@ -1934,6 +1981,7 @@ TLS: $([[ ${config[security]} == 'reality' ]] && echo 'reality' || echo 'tls')
 SNI: ${config[domain]%%:*}
 ALPN: $([[ ${config[transport]} == 'ws' ]] && echo 'http/1.1' || echo 'h2,http/1.1')
 Fingerprint: chrome
+$([[ ${config[security]} != 'reality' ]] && certificate_is_selfsigned && echo 'Allow Insecure: true' || true)
 $([[ ${config[security]} == 'reality' ]] && echo "PublicKey: ${config[public_key]}" || true)
 $([[ ${config[security]} == 'reality' ]] && echo "ShortId: ${config[short_id]}" || true)
       " | tr -s '\n')
@@ -1989,6 +2037,13 @@ function show_server_config {
   server_config=$server_config$'\n'"Telegram Bot: ${config[tgbot]}"
   server_config=$server_config$'\n'"Telegram Bot Token: ${config[tgbot_token]}"
   server_config=$server_config$'\n'"Telegram Bot Admins: ${config[tgbot_admins]}"
+  if [[ ${config[security]} != 'reality' ]]; then
+    if certificate_is_selfsigned; then
+      server_config=$server_config$'\n'"Certificate: self-signed"
+    else
+      server_config=$server_config$'\n'"Certificate: issued"
+    fi
+  fi
   echo "${server_config}"
 }
 
