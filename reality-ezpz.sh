@@ -32,6 +32,8 @@ declare -A image
 config_path="/opt/reality-ezpz"
 compose_project='reality-ezpz'
 tgbot_project='tgbot'
+script_url='https://raw.githubusercontent.com/aleskxyz/reality-ezpz/master/reality-ezpz.sh'
+tgbot_script_url='https://raw.githubusercontent.com/aleskxyz/reality-ezpz/master/tgbot.py'
 BACKTITLE=RealityEZPZ
 MENU="Select an option:"
 HEIGHT=30
@@ -99,14 +101,13 @@ regex[tgbot_token]="^[0-9]{8,10}:[a-zA-Z0-9_-]{35}$"
 regex[tgbot_admins]="^[a-zA-Z][a-zA-Z0-9_]{4,31}(,[a-zA-Z][a-zA-Z0-9_]{4,31})*$"
 regex[domain_port]="^[a-zA-Z0-9]+([-.][a-zA-Z0-9]+)*\.[a-zA-Z]{2,}(:[1-9][0-9]*)?$"
 regex[file_path]="^[a-zA-Z0-9_/.-]+$"
-regex[url]="^(http|https)://([a-zA-Z0-9.-]+\.[a-zA-Z]{2,}|[0-9]{1,3}(\.[0-9]{1,3}){3})(:[0-9]{1,5})?(/.*)?$"
 
 function show_help {
   echo ""
   echo "Usage: reality-ezpz.sh [-t|--transport=tcp|http|grpc|ws|tuic|hysteria2|shadowtls] [-d|--domain=<domain>] [--server=<server>] [--regenerate] [--default]
   [-r|--restart] [--enable-safenet=true|false] [--port=<port>] [-c|--core=xray|sing-box] [--enable-warp=true|false]
   [--warp-license=<license>] [--security=reality|letsencrypt|selfsigned] [-m|--menu] [--show-server-config] [--add-user=<username>] [--lists-users]
-  [--show-user=<username>] [--delete-user=<username>] [--backup] [--restore=<url|file>] [--backup-password=<password>] [-u|--uninstall]"
+  [--show-user=<username>] [--delete-user=<username>] [--backup] [--restore=<file>] [--backup-password=<password>] [-u|--uninstall]"
   echo ""
   echo "  -t, --transport <tcp|http|grpc|ws|tuic|hysteria2|shadowtls> Transport protocol (tcp, http, grpc, ws, tuic, hysteria2, shadowtls, default: ${defaults[transport]})"
   echo "  -d, --domain <domain>     Domain to use as SNI (default: ${defaults[domain]})"
@@ -130,8 +131,8 @@ function show_help {
   echo "      --list-users          List all users"
   echo "      --show-user <username> Shows the config and QR code of the user"
   echo "      --delete-user <username> Delete the user"
-  echo "      --backup              Backup users and configuration and upload it to temp.sh"
-  echo "      --restore <url|file>  Restore backup from URL or file"
+  echo "      --backup              Backup users and configuration to a local file (never uploaded)"
+  echo "      --restore <file>      Restore backup from a local file"
   echo "      --backup-password <password> Create/Restore password protected backup file"
   echo "  -h, --help                Display this help message"
   return 1
@@ -323,8 +324,8 @@ function parse_args {
         ;;
       --restore)
         args[restore]="$2"
-        if [[ ! ${args[restore]} =~ ${regex[file_path]} ]] && [[ ! ${args[restore]} =~ ${regex[url]} ]]; then
-          echo "Invalid: Backup file path or URL is not valid."
+        if [[ ! ${args[restore]} =~ ${regex[file_path]} ]]; then
+          echo "Invalid: Backup file path is not valid."
           return 1
         fi
         shift 2
@@ -359,45 +360,38 @@ function parse_args {
 function backup {
   local backup_name
   local backup_password="$1"
-  local backup_file_url
-  local exit_code
+  local backup_dir
+  local backup_file
   backup_name="reality-ezpz-backup-$(date +%Y-%m-%d_%H-%M-%S).zip"
-  cd "${config_path}"
+  # Written outside ${config_path} so the archive never contains itself.
+  backup_dir="$(dirname "${config_path}")/reality-ezpz-backup"
+  mkdir -p "${backup_dir}"
+  chmod 700 "${backup_dir}"
+  backup_file="${backup_dir}/${backup_name}"
   if [ -z "${backup_password}" ]; then
-    zip -r "/tmp/${backup_name}" . > /dev/null
+    (cd "${config_path}" && zip -r "${backup_file}" . > /dev/null)
   else
-    zip -P "${backup_password}" -r "/tmp/${backup_name}" . > /dev/null
+    (cd "${config_path}" && zip -P "${backup_password}" -r "${backup_file}" . > /dev/null)
   fi
-  if ! backup_file_url=$(curl -fsS -m 30 -F "file=@/tmp/${backup_name}" "https://temp.sh/upload"); then
-    rm -f "/tmp/${backup_name}"
-    echo "Error in uploading backup file" >&2
+  if [[ ! -s "${backup_file}" ]]; then
+    rm -f "${backup_file}"
+    echo "Error in creating backup file" >&2
     return 1
   fi
-  rm -f "/tmp/${backup_name}"
-  echo "${backup_file_url}"
+  # The archive holds the private key, UUIDs and WARP credentials.
+  chmod 600 "${backup_file}"
+  echo "${backup_file}"
 }
 
 function restore {
   local backup_file="$1"
   local backup_password="$2"
-  local temp_file
   local unzip_output
   local unzip_exit_code
   local current_state
   if [[ ! -r ${backup_file} ]]; then
-    temp_file=$(mktemp -u)
-    if [[ "${backup_file}" =~ ^https?://temp\.sh/ ]]; then
-      if ! curl -fSsL -m 30 -X POST "${backup_file}" -o "${temp_file}"; then
-        echo "Cannot download or find backup file" >&2
-        return 1
-      fi
-    else
-      if ! curl -fSsL -m 30 "${backup_file}" -o "${temp_file}"; then
-        echo "Cannot download or find backup file" >&2
-        return 1
-      fi
-    fi
-    backup_file="${temp_file}"
+    echo "Cannot read backup file: ${backup_file}" >&2
+    return 1
   fi
   current_state=$(set +o)
   set +e
@@ -411,7 +405,6 @@ function restore {
   if [[ ${unzip_exit_code} -eq 0 ]]; then
     if ! echo "${unzip_output}" | grep -q 'config'; then
       echo "The provided file is not a reality-ezpz backup file." >&2
-      rm -f "${temp_file}"
       return 1
     fi
   else
@@ -420,7 +413,6 @@ function restore {
     else
       echo "An error occurred during zip file verification: ${unzip_output}" >&2
     fi
-    rm -f "${temp_file}"
     return 1
   fi
   rm -rf "${config_path}"
@@ -435,10 +427,8 @@ function restore {
   eval "$current_state"
   if [[ ${unzip_exit_code} -ne 0 ]]; then
     echo "Error in backup restore: ${unzip_output}" >&2
-    rm -f "${temp_file}"
     return 1
   fi
-  rm -f "${temp_file}"
   return
 }
 
@@ -838,6 +828,7 @@ services:
     environment:
       BOT_TOKEN: ${config[tgbot_token]}
       BOT_ADMIN: ${config[tgbot_admins]}
+      EZPZ_SCRIPT: ${config_path}/reality-ezpz.sh
     volumes:
     - /var/run/docker.sock:/var/run/docker.sock
     - ../:${config_path}
@@ -993,8 +984,43 @@ CMD [ "python", "./tgbot.py" ]
 EOF
 }
 
+function local_repo_file {
+  local name="$1"
+  local source="${BASH_SOURCE[0]}"
+  [[ -z "${source}" ]] && source="$0"
+  # Only a real file next to the script counts; /dev/fd/N from `bash <(curl ...)` does not.
+  if [[ -f "${source}" && -r "${source}" ]]; then
+    if [[ -f "$(dirname "${source}")/${name}" ]]; then
+      echo "$(dirname "${source}")/${name}"
+      return 0
+    fi
+  fi
+  return 1
+}
+
+# Pins the installer inside the config directory so the Telegram bot runs a fixed,
+# already-reviewed copy instead of executing whatever the upstream branch serves at
+# that moment. Deploy-time fetch is the only remaining trust event, once.
+function pin_installer_script {
+  local target="${config_path}/reality-ezpz.sh"
+  local source
+  if source=$(local_repo_file 'reality-ezpz.sh'); then
+    cp -f "${source}" "${target}"
+  elif ! curl -fsSL -m 30 "${script_url}" -o "${target}"; then
+    echo 'Failed to pin reality-ezpz.sh for the Telegram bot' >&2
+    return 1
+  fi
+  chmod 700 "${target}"
+}
+
 function download_tgbot_script {
-  curl -fsSL -m 3 https://raw.githubusercontent.com/aleskxyz/reality-ezpz/master/tgbot.py -o "${path[tgbot_script]}"
+  local source
+  if source=$(local_repo_file 'tgbot.py'); then
+    cp -f "${source}" "${path[tgbot_script]}"
+  else
+    curl -fsSL -m 30 "${tgbot_script_url}" -o "${path[tgbot_script]}"
+  fi
+  chmod 600 "${path[tgbot_script]}"
 }
 
 function generate_selfsigned_certificate {
@@ -1473,6 +1499,7 @@ function generate_config {
     mkdir -p "${config_path}/tgbot"
     generate_tgbot_compose
     generate_tgbot_dockerfile
+    pin_installer_script
     download_tgbot_script
   fi
 }
@@ -2314,12 +2341,12 @@ function backup_menu {
   fi
   if result=$(backup "${backup_password}" 2>&1); then
     clear
-    echo "Backup has been create and uploaded successfully."
-    echo "You can download the backup file from here:"
+    echo "Backup has been created successfully."
+    echo "It stays on this server, mode 600. Copy it somewhere safe yourself:"
     echo ""
     echo "${result}"
     echo ""
-    echo "The URL is valid for 3 days."
+    echo "Move it off the server with scp; there is no upload step."
     echo
     echo "Press Enter to return ..."
     read
@@ -2338,14 +2365,14 @@ function restore_backup_menu {
       --clear \
       --backtitle "$BACKTITLE" \
       --title "Restore Backup" \
-      --inputbox "Enter backup file path or URL" \
+      --inputbox "Enter backup file path" \
       $HEIGHT $WIDTH \
       3>&1 1>&2 2>&3)
     if [[ $? -ne 0 ]]; then
       break
     fi
-    if [[ ! $backup_file =~ ${regex[file_path]} ]] && [[ ! $backup_file =~ ${regex[url]} ]]; then
-      message_box "Invalid Backup path of URL" "Backup file path or URL is not valid."
+    if [[ ! $backup_file =~ ${regex[file_path]} ]]; then
+      message_box "Invalid Backup path" "Backup file path is not valid."
       continue
     fi
     backup_password=$(whiptail \
@@ -2656,9 +2683,9 @@ if [[ ${args[backup]} == true ]]; then
     backup_url=$(backup)
   fi
   if [[ $? -eq 0 ]]; then
-    echo "Backup created successfully. You can download the backup file from this address:"
+    echo "Backup created successfully at:"
     echo "${backup_url}"
-    echo "The URL is valid for 3 days."
+    echo "No upload is performed. Copy the file off the server yourself, then delete it."
     exit 0
   fi
 fi

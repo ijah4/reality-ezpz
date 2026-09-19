@@ -20,7 +20,10 @@ token = os.environ['BOT_TOKEN']
 admin = os.environ['BOT_ADMIN']
 admin_list = admin.split(',')
 username_regex = re.compile("^[a-zA-Z0-9]+$")
-command = 'bash <(curl -sL https://raw.githubusercontent.com/aleskxyz/reality-ezpz/master/reality-ezpz.sh) '
+# Pinned by the installer at deploy time. Never re-fetched from the network here:
+# this container holds /var/run/docker.sock, so a remote script would be host root.
+script = os.environ['EZPZ_SCRIPT']
+command = f'bash {shlex.quote(script)} '
 
 
 def run_command(cmd):
