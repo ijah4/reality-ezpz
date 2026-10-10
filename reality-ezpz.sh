@@ -52,7 +52,7 @@ WIDTH=60
 CHOICE_HEIGHT=20
 
 image[xray]="teddysun/xray:26.7.28"
-image[sing-box]="gzxhwq/sing-box:1.14.1"
+image[sing-box]="gzxhwq/sing-box:1.14.3"
 image[nginx]="nginx:1.30.4"
 image[certbot]="certbot/certbot:v5.7.0"
 image[haproxy]="haproxy:3.4.4"
@@ -73,7 +73,10 @@ defaults[warp_interface_ipv4]=""
 defaults[warp_interface_ipv6]=""
 defaults[core]=sing-box
 defaults[security]=reality
-defaults[server]=$(curl -fsSL --ipv4 https://cloudflare.com/cdn-cgi/trace | grep ip | cut -d '=' -f2)
+# Resolved eagerly, so it is one request on every invocation of this script: it needs a timeout,
+# and a failure has to leave the variable empty rather than abort the run under `set -e` (an
+# existing install reads its own server= from the config file and never misses this value).
+defaults[server]=$(curl -fsSL -m 5 --ipv4 https://cloudflare.com/cdn-cgi/trace 2>/dev/null | grep -m1 '^ip=' | cut -d '=' -f2 || true)
 defaults[tgbot]=OFF
 defaults[tgbot_token]=""
 defaults[tgbot_admins]=""
@@ -758,6 +761,13 @@ services:
     $([[ ${config[security]} != 'reality' && ${config[transport]} != 'shadowtls' ]] && echo "expose:" || true)
     $([[ ${config[security]} != 'reality' && ${config[transport]} != 'shadowtls' ]] && echo "- 8443" || true)
     restart: always
+    # Nothing caps the default json-file log, so a long-running engine grows
+    # /var/lib/docker until the disk is full. 30 MB per service is plenty at level=error.
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
     user: "${engine_uid}:${engine_gid}"
     read_only: true
     cap_drop: [ALL]
@@ -782,6 +792,11 @@ echo "
     expose:
     - 80
     restart: always
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
     volumes:
     - ./website:/usr/share/nginx/html
     networks:
@@ -792,6 +807,11 @@ echo "
     $([[ ${config[security]} == 'letsencrypt' || ${config[port]} -eq 443 ]] && echo '- 80:8080' || true)
     - ${config[port]}:8443
     restart: always
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
     volumes:
     - ./${path[haproxy]#${config_path}/}:/usr/local/etc/haproxy/haproxy.cfg
     - ./${path[server_pem]#${config_path}/}:/usr/local/etc/haproxy/server.pem
@@ -806,6 +826,11 @@ echo "
     expose:
     - 80
     restart: always
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
     volumes:
     - /var/run/docker.sock:/var/run/docker.sock
     - ./certbot/data:/etc/letsencrypt
@@ -834,6 +859,11 @@ services:
   tgbot:
     build: ./
     restart: always
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
     security_opt:
     - no-new-privileges:true
     cap_drop: [ALL]
@@ -1240,6 +1270,14 @@ function generate_engine_config {
         users_object=${users_object}'{"uuid": "'"${users[${user}]}"'", "flow": "'"$([[ ${config[transport]} == 'tcp' ]] && echo 'xtls-rprx-vision' || true)"'", "name": "'"${user}"'"}'
       fi
     done
+    # The "block" rule-set (ads + malware + phishing + miners + torrent sites) is deliberately
+    # not rejected here any more. It matches on domain, and content is regularly served from an
+    # ad domain family -- jable.tv's HLS playlist lives on *.mushroomtrack.com, which sits in the
+    # ads category -- so rejecting the list breaks the site instead of its ads. It is also a
+    # fingerprint: a deterministic reject for a known ad domain identifies the node as a
+    # filtering proxy to anyone who probes it, without needing an account. Ad blocking belongs
+    # on the client; only private ranges stay rejected. The copy on disk is still refreshed, so
+    # the list can be put back with a ${config_path}/sing-box.patch entry.
     cat >"${path[engine]}" <<EOF
 {
   "log": {
@@ -1351,7 +1389,6 @@ $(generate_rule_set_object)
     fi )
       {
         "rule_set": [
-          "block",
           "geoip-private",
           "geosite-private"
           $([[ ${config[safenet]} == ON ]] && echo ',"nsfw"' || true)
@@ -1425,6 +1462,11 @@ EOF
       fi
       users_object=${users_object}'{"id": "'"${users[${user}]}"'", "flow": "'"$([[ ${config[transport]} == 'tcp' ]] && echo 'xtls-rprx-vision' || true)"'", "email": "'"${user}"'"}'
     done
+    # geosite:category-ads-all came out of this list for the same reason as the sing-box
+    # rule-set above: it matches by domain, so it takes the content down with the ads
+    # (jable.tv's *.mushroomtrack.com is in that category), and a reject on a known ad domain
+    # is a fingerprint a prober can use to identify the node without credentials. The three
+    # literal domains below stay: they are specific abuse domains, not a category.
     cat >"${path[engine]}" <<EOF
 {
   "log": {
@@ -1529,7 +1571,6 @@ EOF
         "outboundTag": "block",
         "domain": [
           $([[ ${config[safenet]} == ON ]] && echo '"geosite:category-porn",' || true)
-          "geosite:category-ads-all",
           "domain:pushnotificationws.com",
           "domain:sunlight-leds.com",
           "domain:icecyber.org"
@@ -2759,9 +2800,20 @@ function message_box {
     3>&1 1>&2 2>&3
 }
 
+# md5sum refuses a directory and prints nothing, so hashing path[rules] used to leave md5[rules]
+# empty on both sides of the comparison in check_reload. A refreshed rule-set therefore never
+# looked like a change and the engine kept running the copies it had loaded at startup. The
+# directory is hashed over its files instead, in a stable order, and an empty (or missing)
+# directory hashes to the empty string just as before.
 function get_md5 {
   local file_path
   file_path=$1
+  if [[ -d "${file_path}" ]]; then
+    if find "${file_path}" -type f -print -quit 2>/dev/null | grep -q .; then
+      find "${file_path}" -type f -print0 2>/dev/null | sort -z | xargs -0 md5sum 2>/dev/null | md5sum | cut -f1 -d' '
+    fi
+    return 0
+  fi
   md5sum "${file_path}" 2>/dev/null | cut -f1 -d' ' || true
 }
 
@@ -2804,6 +2856,12 @@ function generate_file_list {
 }
 
 function tune_kernel {
+  # tcp_max_tw_buckets caps TIME_WAIT sockets outright; at 5000 a busy proxy churns through the
+  # budget and the kernel starts dropping entries with "time wait bucket table overflow". The
+  # conntrack table is also sized by two numbers: nf_conntrack_max (raised below) is the entry
+  # ceiling and the bucket count comes from the module, so at the default 65536 buckets the
+  # 1000000 ceiling is ~15 entries per bucket. The module option only applies on load, so it is
+  # written for the next boot; the running table is resized on a best-effort basis.
   cat >/etc/sysctl.d/99-reality-ezpz.conf <<EOF
 fs.file-max = 200000
 net.core.rmem_max = 67108864
@@ -2816,7 +2874,7 @@ net.ipv4.tcp_fin_timeout = 10
 net.ipv4.tcp_keepalive_time = 600
 net.ipv4.ip_local_port_range = 10000 65000
 net.ipv4.tcp_max_syn_backlog = 8192
-net.ipv4.tcp_max_tw_buckets = 5000
+net.ipv4.tcp_max_tw_buckets = 131072
 net.ipv4.tcp_fastopen = 3
 net.ipv4.tcp_mem = 25600 51200 102400
 net.ipv4.tcp_rmem = 4096 65536 67108864
@@ -2839,6 +2897,8 @@ net.ipv6.conf.all.accept_source_route = 0
 net.ipv6.conf.default.accept_source_route = 0
 EOF
   sysctl -qp /etc/sysctl.d/99-reality-ezpz.conf >/dev/null 2>&1 || true
+  echo "options nf_conntrack hashsize=262144" >/etc/modprobe.d/99-reality-ezpz.conf
+  sysctl -qw net.netfilter.nf_conntrack_buckets=262144 2>/dev/null || true
 }
 
 function configure_docker {
